@@ -1,0 +1,5 @@
+.env
+.venv
+.qodo
+.history
+__pycache__
