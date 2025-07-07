@@ -1,26 +1,10 @@
 # AI Web Scraper
 
-An advanced AI-powered web scraper that finds and compares product prices across multiple retailers using browser automation and Gemini AI.
+![Sample Output](output-sample.png)
 
-## Features
+A fast, robust AI-powered product price scraper using browser_use + Gemini. Finds, validates, and extracts prices from top e-commerce sites with multi-country and multi-currency support.
 
-- 🔍 Smart Google product search
-- 🛡️ Multi-layer trust validation (domain age, SSL, blacklist)
-- 🤖 AI-powered scraping (Gemini 2.5 Flash)
-- 🌍 Multi-country & multi-currency support
-- 📊 Table & JSON output, full logging
-
-## Why This Approach?
-
-- Other LLMs (Groq+Llama3, Mavericka, Scout) hit context limits (500k tokens) and fail on large logs
-- Heuristic/selenium fallback is less robust for dynamic sites
-- `browser_use` + Gemini gives best reliability for price extraction
-
-## Requirements
-
-- Python 3.11+
-- Google Gemini API key
-- Internet connection
+---
 
 ## Installation
 
@@ -28,22 +12,22 @@ An advanced AI-powered web scraper that finds and compares product prices across
 
    ```bash
    git clone https://github.com/RohanSai22/AI-Scraper.git
-   cd AI-Scraper
+   cd "AI-Scraper"
    ```
 
-2. **Create a Python virtual environment (Python 3.11+ recommended):**
+2. **Create a Python 3.11+ virtual environment:**
 
    ```bash
-   python -m venv .venv
-   # On Windows:
-   .venv\Scripts\activate
-   # On macOS/Linux:
-   source .venv/bin/activate
+   python -m venv venv
+   venv\Scripts\activate  # On Windows
+   # or
+   source venv/bin/activate  # On Linux/Mac
    ```
 
-3. **Install dependencies:**
+3. **Install dependencies (use uv for speed):**
 
    ```bash
+   pip install uv
    uv pip install -r requirements.txt
    ```
 
@@ -59,6 +43,8 @@ An advanced AI-powered web scraper that finds and compares product prices across
    GEMINI_API_KEY=your_gemini_api_key_here
    ```
 
+---
+
 ## Usage
 
 Run:
@@ -67,23 +53,41 @@ Run:
 python main.py
 ```
 
-Follow the prompts for product and country. Results are shown in table and JSON formats.
+- Enter your product and country when prompted.
+- Results are shown in table, text, and JSON formats.
 
-## Output Example
+---
 
-```
-🛒 FINAL PRICE COMPARISON REPORT (Location: India)
-Retailer URL                                 Price        Availability
-https://www.flipkart.com/...                 ₹107900.00   Available
-https://www.apple.com/in/shop/...            ₹119900.00   Available
-```
+## Notes & Tips
 
-## Notes
+- **Google Search 429 Error:**
+  > ❌ An error occurred during Google Search: 429 Client Error: Too Many Requests ...
+  - This is due to rate-limiting by Google (since we use `googlesearch-python` as a workaround for not using a paid SERP API). If you see this, just retry (it usually works after 2-4 tries).
 
-- Works with most e-commerce sites seamlessly (Apple, Flipkart, BestBuy, etc.)
-- All logs saved in `logs/` directory
-- For issues, check logs and your API key
+- **URL Limit:**
+  - By default, only 2 URLs are scraped per search for speed and to avoid Gemini API quota issues. You can increase this in `main.py` (`NUM_SEARCH_RESULTS`), but be aware of API usage if on a free tier.
 
-## License
+- **Why browser_use + Gemini?**
+  - Other approaches (Groq+Llama3, Mavericka, Scout, Selenium+heuristics) were tested but failed on context size, reliability, or dynamic content. browser_use with Gemini is the most robust for real-world e-commerce scraping.
 
-MIT License. For research/educational use only. Respect site terms and robots.txt.
+---
+
+## Features
+
+- Google search + trust validation
+- AI browser agent for price extraction
+- Multi-country, multi-currency
+- Table, text, and JSON output
+- Full logs in `logs/`
+
+---
+
+## Troubleshooting
+
+- Use a valid Gemini API key
+- Use a fresh virtual environment
+- If scraping fails, retry or increase `NUM_SEARCH_RESULTS`
+
+---
+
+MIT License
