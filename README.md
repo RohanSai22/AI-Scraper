@@ -73,7 +73,7 @@ python main.py
 - **Why browser_use + Gemini?**
   - Other approaches (Groq+Llama3, Mavericka, Scout, Selenium+heuristics) were tested but failed on context size, reliability, or dynamic content. 
     
-    browser_use with Gemini is the most robust for real-world e-commerce scraping.
+    browser_use with Gemini along {gemini-2.5-flash} model is the most robust for real-world e-commerce scraping.We can try it out with gemini-2.5-pro as well.
 
 ---
 
