@@ -1,412 +1,523 @@
-from browser_use.llm import ChatGroq
-from browser_use import Agent
-from dotenv import load_dotenv
+import sys
+import os
 import asyncio
+import re
 import json
-import pandas as pd
-import pycountry
-import ssl
-import socket
 from urllib.parse import urlparse
-from datetime import datetime
+from datetime import datetime, timedelta
+import io
+from contextlib import redirect_stdout, redirect_stderr
+import logging
+
+# Environment and API
+from dotenv import load_dotenv
+from browser_use.llm import ChatGoogle
+from browser_use import Agent
+
+# Data Handling and Display
+import pandas as pd
+from IPython.display import display
+
+# Search and Validation
+import pycountry
 from googlesearch import search
 import whois
-import re
+import ssl
+import socket
 
-load_dotenv()
+# --- CONFIGURATION ---
+# Validation settings
+NUM_SEARCH_RESULTS = 2  # Reduced for faster execution in the scraping phase
+MINIMUM_DOMAIN_AGE_DAYS = 365
+HIGH_RISK_TLDS = ['.zip', '.top', '.xyz', '.club', '.online', '.loan', '.work', '.gq', '.cf', '.tk']
+DOMAIN_BLACKLIST = [
+    'youtube.com', 'youtu.be', 'wikipedia.org', 'facebook.com', 'twitter.com', 'instagram.com',
+    'pinterest.com', 'linkedin.com', 'reddit.com', 'quora.com', 'google.com', 'amazon.com' # Amazon is often too complex for simple scraping
+]
+EXCLUSION_KEYWORDS = ['review', 'news', 'vs', 'compare']
 
-class PriceComparator:
-    def __init__(self):
-        self.llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct")
-        self.num_results = 10
-        self.domain_blacklist = [
-            'youtube.com', 'youtu.be', 'wikipedia.org', 'facebook.com', 'twitter.com', 
-            'instagram.com', 'pinterest.com', 'linkedin.com', 'reddit.com', 'quora.com'
-        ]
-        self.high_risk_tlds = ['.zip', '.top', '.xyz', '.club', '.online', '.loan', '.work']
-        
-    def get_user_input(self):
-        """Get product query and country from user"""
-        product_query = input("Enter the product you want to search for: ")
-        
-        # Get countries data
-        countries_data = sorted([{'name': c.name, 'code': c.alpha_2} for c in pycountry.countries], 
-                               key=lambda x: x['name'])
-        
-        print("\n--- Select a country ---")
-        for i, country in enumerate(countries_data[:20]):  # Show first 20 for brevity
-            print(f"{i+1:<3} - {country['name']} ({country['code']})")
-        print("... (or enter country code directly)")
-        
-        # Get country selection
-        while True:
-            try:
-                choice = input(f"\nEnter number (1-20) or country code (e.g., US, IN, SG): ").strip()
-                
-                if choice.isdigit() and 1 <= int(choice) <= 20:
-                    selected_country = countries_data[int(choice) - 1]
-                    break
-                elif len(choice) == 2 and choice.upper() in [c['code'] for c in countries_data]:
-                    selected_country = next(c for c in countries_data if c['code'] == choice.upper())
-                    break
-                else:
-                    print("❌ Invalid input. Try again.")
-            except KeyboardInterrupt:
-                print("\nOperation cancelled.")
-                return None, None
-        
-        return product_query, selected_country
-    
-    def validate_domain(self, domain):
-        """Quick domain validation"""
-        try:
-            # Check blacklist
-            if any(blacklisted in domain for blacklisted in self.domain_blacklist):
-                return False, "Blacklisted domain"
-            
-            # Check TLD
-            if any(domain.endswith(tld) for tld in self.high_risk_tlds):
-                return False, "High-risk TLD"
-            
-            # Check SSL (quick check)
-            try:
-                context = ssl.create_default_context()
-                with socket.create_connection((domain, 443), timeout=3) as sock:
-                    with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                        return True, "Valid"
-            except:
-                return False, "SSL issues"
-                
-        except Exception as e:
-            return False, f"Error: {str(e)}"
-    
-    def search_and_validate_urls(self, product_query, country_code):
-        """Search for URLs and validate them"""
-        print(f"\n🔍 Searching for '{product_query}' in {country_code}...")
-        
-        try:
-            # Add some delay to avoid rate limiting
-            import time
-            time.sleep(2)
-            
-            # Try multiple search strategies
-            search_queries = [
-                f"{product_query} buy online",
-                f"{product_query} price",
-                f"{product_query} shop"
-            ]
-            
-            raw_urls = []
-            for query in search_queries:
-                try:
-                    # Perform Google search
-                    search_results = search(
-                        query,
-                        num_results=self.num_results // len(search_queries),
-                        lang='en',
-                        region=country_code.lower(),
-                        advanced=True
-                    )
-                    
-                    for result in search_results:
-                        raw_urls.append(result.url)
-                    
-                    time.sleep(1)  # Delay between searches
-                    
-                except Exception as e:
-                    print(f"❌ Search error for query '{query}': {e}")
-                    continue
-            
-            print(f"✅ Found {len(raw_urls)} URLs")
-            
-        except Exception as e:
-            print(f"❌ Search error: {e}")
-            # Fallback: use some known shopping sites
-            raw_urls = [
-                f"https://www.apple.com/search/{product_query.replace(' ', '%20')}",
-                f"https://www.amazon.com/s?k={product_query.replace(' ', '+')}",
-                f"https://www.bestbuy.com/site/searchpage.jsp?st={product_query.replace(' ', '%20')}",
-                f"https://www.walmart.com/search?q={product_query.replace(' ', '%20')}",
-                f"https://www.target.com/s?searchTerm={product_query.replace(' ', '%20')}"
-            ]
-            print(f"✅ Using fallback URLs: {len(raw_urls)} URLs")
-        
-        # Validate URLs
-        validated_urls = []
-        checked_domains = set()
-        
-        for url in raw_urls:
-            try:
-                url_parts = urlparse(url)
-                domain = url_parts.netloc.replace('www.', '')
-                
-                if domain in checked_domains or not domain:
-                    continue
-                    
-                checked_domains.add(domain)
-                is_valid, reason = self.validate_domain(domain)
-                
-                if is_valid:
-                    validated_urls.append(url)
-                    print(f"✅ {domain}")
-                else:
-                    print(f"❌ {domain} - {reason}")
-                    
-            except Exception as e:
-                print(f"❌ Error validating {url}: {e}")
-        
-        print(f"\n🎯 Final validated URLs: {len(validated_urls)}")
-        return validated_urls
-    
-    def split_text_for_llm(self, text, max_tokens=5000):
-        """Split text to stay within token limits (rough estimate: 4 chars = 1 token)"""
-        max_chars = max_tokens * 4
-        if len(text) <= max_chars:
-            return [text]
-        
-        # Split into chunks
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = min(start + max_chars, len(text))
-            # Try to split at word boundaries
-            if end < len(text):
-                # Find last space before the limit
-                last_space = text.rfind(' ', start, end)
-                if last_space > start:
-                    end = last_space
-            chunks.append(text[start:end])
-            start = end
-        
-        return chunks
+# --- HELPER FUNCTIONS FOR VALIDATION ---
 
-    async def scrape_price_from_url(self, url, product_query):
-        """Scrape price from a single URL using browser automation"""
+def check_domain_age(domain):
+    try:
+        domain_info = whois.whois(domain)
+        creation_date = domain_info.creation_date
+        if isinstance(creation_date, list): creation_date = creation_date[0]
+        if creation_date is None: return False, "Unknown Age"
+        age = (datetime.now() - creation_date).days
+        return age > MINIMUM_DOMAIN_AGE_DAYS, f"{age} days old"
+    except Exception:
+        return False, "WHOIS Error"
+
+def check_url_structure(url_parts):
+    if any(url_parts.netloc.endswith(tld) for tld in HIGH_RISK_TLDS):
+        return False, "High-Risk TLD"
+    if len(url_parts.netloc.split('.')) > 4:
+        return False, "Excessive Subdomains"
+    return True, "Looks OK"
+
+def check_ssl_certificate(domain):
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+                return bool(cert), "Valid Certificate"
+    except Exception:
+        return False, "SSL/Socket Error"
+
+# --- CORE LOGIC ---
+
+def get_user_input():
+    """Handles Step 1: Interactively gets product and country from the user."""
+    print("--- Please provide the product details ---")
+    product_query = input("Enter the product you want to search for: ")
+
+    countries_data = sorted([{'name': c.name, 'code': c.alpha_2} for c in pycountry.countries], key=lambda x: x['name'])
+    print("\n--- Please select a country from the list below ---")
+    for i, country in enumerate(countries_data):
+        print(f"{i+1:<4} - {country['name']} ({country['code']})")
+
+    selected_country = None
+    while True:
         try:
-            # Create a focused task that respects token limits
-            task = f"""
-            Go to: {url}
-            
-            Search for product: {product_query}
-            
-            Extract ONLY:
-            1. Product name (exact title)
-            2. Price (numbers only, no symbols)
-            3. Currency (USD/INR/SGD/etc.)
-            
-            Return JSON:
-            {{"productName": "name", "price": "999", "currency": "USD"}}
-            
-            If no price: {{"error": "No price found"}}
-            """
-            
-            # Ensure task is within token limits
-            if len(task) > 5000 * 4:  # 5000 tokens * 4 chars per token
-                task = f"""
-                Go to: {url}
-                Find: {product_query}
-                Extract: name, price, currency
-                JSON: {{"productName": "name", "price": "999", "currency": "USD"}}
-                """
-            
-            agent = Agent(task=task, llm=self.llm)
-            result = await agent.run()
-            
-            # Try to extract JSON from the result
-            try:
-                # Look for JSON in the response
-                json_match = re.search(r'\{.*\}', str(result), re.DOTALL)
-                if json_match:
-                    price_data = json.loads(json_match.group())
-                    if 'error' not in price_data and 'price' in price_data:
-                        price_data['link'] = url
-                        return price_data
-            except Exception as json_error:
-                print(f"❌ JSON parsing error: {json_error}")
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ Error scraping {url}: {e}")
-            return None
-    
-    async def scrape_all_prices(self, urls, product_query):
-        """Scrape prices from all URLs"""
-        print(f"\n💰 Scraping prices from {len(urls)} URLs...")
-        
-        results = []
-        for i, url in enumerate(urls, 1):
-            print(f"\n[{i}/{len(urls)}] Scraping: {url}")
-            price_data = await self.scrape_price_from_url(url, product_query)
-            
-            if price_data:
-                results.append(price_data)
-                print(f"✅ Found: {price_data.get('productName', 'N/A')} - {price_data.get('price', 'N/A')} {price_data.get('currency', 'N/A')}")
-                
-                # Save result immediately after each successful scrape
-                self.save_results_incrementally(results)
+            choice_str = input(f"\n➡️ Enter the number for your desired country (1-{len(countries_data)}): ")
+            choice_num = int(choice_str)
+            if 1 <= choice_num <= len(countries_data):
+                selected_country = countries_data[choice_num - 1]
+                break
             else:
-                print("❌ No price found")
-        
-        return results
-    
-    def sort_and_display_results(self, results):
-        """Sort results by price and display"""
-        if not results:
-            print("\n❌ No prices found!")
-            return []
-        
-        # Sort by price (convert to float for proper sorting)
+                print(f"❌ Error: Please enter a number between 1 and {len(countries_data)}.")
+        except (ValueError, IndexError):
+            print("❌ Error: Invalid input. Please enter a valid number.")
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            sys.exit()
+
+    logging.info("\n" + "="*50)
+    logging.info("✅ INPUT CAPTURED SUCCESSFULLY")
+    logging.info("="*50)
+    logging.info(f"  -> Product Query: '{product_query}'")
+    logging.info(f"  -> Search Location: {selected_country['name']} ({selected_country['code']})")
+    return product_query, selected_country['code'], selected_country['name']
+
+
+def validate_search_results(product_query, country_code):
+    """Handles Step 2: Performs Google search and validates URLs."""
+    print(f"\n🕵️ Starting search for '{product_query}' in region: {country_code.upper()}...")
+    try:
+        search_results = search(
+            product_query,
+            num_results=NUM_SEARCH_RESULTS,
+            lang='en',
+            region=country_code.lower(),
+            advanced=True
+        )
+        raw_urls = [result.url for result in search_results]
+        logging.info(f"✅ Google search found {len(raw_urls)} potential URLs.")
+    except Exception as e:
+        logging.error(f"\n❌ An error occurred during Google Search: {e}")
+        return []
+
+    print(f"\n2. Validating URLs through the Trust Funnel...")
+    validated_urls = []
+    checked_domains = set()
+
+    for url in raw_urls:
         try:
-            valid_results = []
-            for result in results:
-                try:
-                    price = float(re.sub(r'[^\d.]', '', str(result.get('price', '0'))))
-                    result['price_numeric'] = price
-                    valid_results.append(result)
-                except:
-                    continue
+            url_parts = urlparse(url)
+            domain = url_parts.netloc.replace('www.', '')
+
+            if not domain or domain in checked_domains:
+                continue
+            checked_domains.add(domain)
+
+            # --- RUNNING THE FUNNEL ---
+            if any(blacklisted in domain for blacklisted in DOMAIN_BLACKLIST):
+                continue
+            if any(keyword in url.lower() for keyword in EXCLUSION_KEYWORDS):
+                continue
+            if not url.startswith('https://'):
+                continue
+
+            is_structured_ok, _ = check_url_structure(url_parts)
+            if not is_structured_ok:
+                continue
+
+            is_old_enough, _ = check_domain_age(domain)
+            if not is_old_enough:
+                continue
             
-            sorted_results = sorted(valid_results, key=lambda x: x['price_numeric'])
+            is_cert_valid, _ = check_ssl_certificate(domain)
+            if not is_cert_valid:
+                continue
+
+            # If all checks pass, add to the list
+            validated_urls.append(url)
+        except Exception:
+            continue
             
-            # Display as table
-            print("\n" + "="*80)
-            print("🏆 PRICE COMPARISON RESULTS (Sorted by Price)")
-            print("="*80)
-            
-            df_data = []
-            for result in sorted_results:
-                df_data.append({
-                    'Product': result.get('productName', 'N/A')[:50],
-                    'Price': result.get('price', 'N/A'),
-                    'Currency': result.get('currency', 'N/A'),
-                    'Website': urlparse(result.get('link', '')).netloc
-                })
-            
-            df = pd.DataFrame(df_data)
-            print(df.to_string(index=False))
-            
-            # Format for JSON output
-            final_results = []
-            for result in sorted_results:
-                final_results.append({
-                    'link': result.get('link', ''),
-                    'price': str(result.get('price', '')),
-                    'currency': result.get('currency', ''),
-                    'productName': result.get('productName', '')
-                })
-            
-            return final_results
-            
-        except Exception as e:
-            print(f"❌ Error sorting results: {e}")
-            return results
+    logging.info(f"✅ Validation complete. Found {len(validated_urls)} high-trust URLs.")
+    return validated_urls
+
+
+async def analyze_log_with_llm(terminal_log: str, product_query: str, llm: ChatGoogle):
+    """
+    Uses an LLM to analyze the raw terminal output from the agent to determine
+    the final price and availability.
+    """
+    print("🧠 Sending terminal log to Gemini for final analysis...")
     
-    def save_results_incrementally(self, results):
-        """Save results to JSON file after each successful scrape"""
-        try:
-            # Sort results by price before saving
-            valid_results = []
-            for result in results:
-                try:
-                    price = float(re.sub(r'[^\d.]', '', str(result.get('price', '0'))))
-                    result['price_numeric'] = price
-                    valid_results.append(result)
-                except:
-                    continue
-            
-            sorted_results = sorted(valid_results, key=lambda x: x['price_numeric'])
-            
-            # Format for JSON output
-            final_results = []
-            for result in sorted_results:
-                final_results.append({
-                    'link': result.get('link', ''),
-                    'price': str(result.get('price', '')),
-                    'currency': result.get('currency', ''),
-                    'productName': result.get('productName', '')
-                })
-            
-            # Save to JSON file
-            output_file = 'price_comparison_results.json'
-            with open(output_file, 'w') as f:
-                json.dump(final_results, f, indent=2)
-            
-            print(f"💾 Results saved to {output_file} ({len(final_results)} items)")
-            
-        except Exception as e:
-            print(f"❌ Error saving results: {e}")
+    analysis_prompt = f"""
+    You are a data analyst. Your task is to analyze the provided terminal log from a web scraping agent.
+    The agent's goal was to find the price for the product: "{product_query}".
+
+    Based on the log, determine the final outcome. Answer in a JSON format with two keys: 'price' and 'status'.
+    - 'price': Should be a float number (e.g., 1399.00). If the price is not found or the product is unavailable, set it to null.
+    - 'status': Should be a string. Possible values are "Available", "Out of Stock", "Not Found", or "Scraping Error".
+
+    Look for patterns like:
+    - "📄 Result: 119900" or "📄 Result: 107900" (extract the number)
+    - "✅ Task completed successfully" (indicates success)
+    - "Out of Stock" or "Not Found" (indicates unavailable)
+    - Any price extraction or currency symbols
+
+    Here is the terminal log:
+    --- LOG START ---
+    {terminal_log}
+    --- LOG END ---
+
+    Provide only the JSON object in your response.
+    """
     
-    async def run(self, product_query=None, country_code=None):
-        """Main execution function"""
-        print("🛒 AI Price Comparison Tool")
-        print("="*50)
+    try:
+        # Use the correct method for ChatGoogle
+        messages = [{"role": "user", "content": analysis_prompt}]
+        response = await llm.achat(messages)
+        response_text = response.content if hasattr(response, 'content') else str(response)
         
-        # Get input
-        if not product_query or not country_code:
-            product_query, country_data = self.get_user_input()
-            if not product_query:
-                return
-            country_code = country_data['code']
-            country_name = country_data['name']
+        # Clean the response to get only the JSON part
+        json_match = re.search(r'```json\n(.*?)```', response_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
         else:
-            country_name = country_code
+            json_str = response_text.strip()
+            
+        result = json.loads(json_str)
+        print(f"✅ Gemini analysis complete: {result}")
+        return result
+    except Exception as e:
+        print(f"❌ Error during Gemini log analysis: {e}")
+        return {"price": None, "status": "Analysis Error"}
+
+
+async def scrape_prices_with_agent(product_query, urls, llm):
+    """Handles Step 3: Iterates through URLs, uses the AI agent to get the price, and logs everything."""
+    scraped_data = []
+    total_urls = len(urls)
+    MODEL_OUTPUT_DIR = os.path.join("logs", "model_output")
+    COMPLETE_VIEW_DIR = os.path.join("logs", "complete_view")
+    os.makedirs(MODEL_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(COMPLETE_VIEW_DIR, exist_ok=True)
+
+    for i, url in enumerate(urls, 1):
+        logging.info("\n" + "-"*60)
+        logging.info(f"🔎 Processing URL {i}/{total_urls}: {url}")
+
+        # Limit the sanitized URL length to avoid FileNotFoundError on Windows
+        sanitized_url = re.sub(r'https?://(www\.)?', '', url).replace('/', '_').replace(':', '_').replace('?', '_').replace('=', '_').replace('&', '_')[:100]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_base_name = f"{sanitized_url}_{timestamp}"
+        model_output_log_path = os.path.join(MODEL_OUTPUT_DIR, f"{log_base_name}.log")
+        complete_view_log_path = os.path.join(COMPLETE_VIEW_DIR, f"{log_base_name}.log")
+
+        task = f"""
+        Go to the website: {url}
+        Your task is to find the price for the product: "{product_query}".
+        1. Navigate the page. If there are product options (e.g., color, storage, model), select the ones that best match the query.
+        2. Find the final price.
+        3. If the product is out of stock, unavailable, or a price cannot be found, state that clearly.
+        Your final response must be concise. Return ONLY the price as a number (e.g., '1099.99') OR the status 'Out of Stock' or 'Not Found'.
+        Do not include currency symbols or any other text.
+        """
+
+        # --- Logging Setup ---
+        log_capture_stream = io.StringIO()
+        agent_logger = logging.getLogger('browser_use')
+        stream_handler = logging.StreamHandler(log_capture_stream)
+        original_handlers = agent_logger.handlers[:]
+        original_level = agent_logger.level
+        agent_logger.addHandler(stream_handler)
+        agent_logger.setLevel(logging.INFO)
+
+        terminal_output = ""
+        raw_agent_output = None
+        agent_result_obj = None
         
-        print(f"\n🎯 Searching for: {product_query}")
-        print(f"📍 Location: {country_name} ({country_code})")
+        try:
+            agent = Agent(task=task, llm=llm, max_loops=8)
+            agent_result_obj = await agent.run()
+
+            # Extract the raw final answer from the agent's result
+            if agent_result_obj:
+                # Try to get the final result from the agent
+                if hasattr(agent_result_obj, 'final_result'):
+                    raw_agent_output = agent_result_obj.final_result
+                elif hasattr(agent_result_obj, 'result'):
+                    raw_agent_output = agent_result_obj.result
+                elif hasattr(agent_result_obj, 'last_result'):
+                    raw_agent_output = agent_result_obj.last_result
+                # Check if it's a list-like object with results
+                elif hasattr(agent_result_obj, '__iter__') and not isinstance(agent_result_obj, str):
+                    try:
+                        # Look for the last result in the history
+                        results = list(agent_result_obj)
+                        if results:
+                            for result in reversed(results):
+                                if hasattr(result, 'extracted_content'):
+                                    raw_agent_output = result.extracted_content
+                                    break
+                                elif hasattr(result, 'long_term_memory'):
+                                    if 'Result:' in str(result.long_term_memory):
+                                        raw_agent_output = result.long_term_memory
+                                        break
+                    except:
+                        pass
+                else:
+                    raw_agent_output = str(agent_result_obj)
+            else:
+                raw_agent_output = "No result returned"
+            
+            print(f"✅ Agent task finished. Raw Output: '{raw_agent_output}'")
+
+        except Exception as e:
+            print(f"❌ Agent execution failed for {url}: {e}")
+            log_capture_stream.write(f"\n--- AGENT EXECUTION FAILED ---\nURL: {url}\nERROR: {e}\n")
+            raw_agent_output = f"Agent Execution Error: {e}"
+        finally:
+            # --- Restore logger and get captured output ---
+            agent_logger.handlers[:] = original_handlers
+            agent_logger.setLevel(original_level)
+            terminal_output = log_capture_stream.getvalue()
+            
+            # --- Save logs regardless of outcome ---
+            with open(model_output_log_path, 'w', encoding='utf-8') as f:
+                f.write(terminal_output)
+            print(f"📄 Verbose agent logs saved to: {model_output_log_path}")
+            
+            if agent_result_obj:
+                with open(complete_view_log_path, 'w', encoding='utf-8') as f:
+                    f.write(str(agent_result_obj))
+                print(f"📄 Complete agent history saved to: {complete_view_log_path}")
+
+        # --- Analyze the captured log with the LLM ---
+        analysis_result = await analyze_log_with_llm(terminal_output, product_query, llm)
+
+        price = analysis_result.get('price')
+        status = analysis_result.get('status', 'Analysis Error')
+
+        # Fallback: Try to extract price from terminal log directly
+        if price is None:
+            # Look for "📄 Result: [number]" pattern
+            result_match = re.search(r'📄 Result: (\d+(?:\.\d+)?)', terminal_output)
+            if result_match:
+                try:
+                    price = float(result_match.group(1))
+                    status = "Available"
+                    print(f"🔍 Extracted price from terminal log: {price}")
+                except:
+                    pass
+            
+            # Look for "✅ Task completed successfully" with a result
+            elif "✅ Task completed successfully" in terminal_output:
+                # Check if raw_agent_output is numeric
+                if raw_agent_output and isinstance(raw_agent_output, (int, float)):
+                    price = float(raw_agent_output)
+                    status = "Available"
+                elif raw_agent_output and str(raw_agent_output).replace('.', '').replace(',', '').isdigit():
+                    price = float(str(raw_agent_output).replace(',', ''))
+                    status = "Available"
+                elif "Not Found" in terminal_output:
+                    status = "Not Found"
+                elif "Out of Stock" in terminal_output:
+                    status = "Out of Stock"
+                else:
+                    status = "Scraping Error"
+            else:
+                status = "Scraping Error"
+
+        # Determine currency from the log
+        currency = "USD"  # default
+        if "₹" in terminal_output or "INR" in terminal_output.upper():
+            currency = "INR"
+        elif "£" in terminal_output or "GBP" in terminal_output.upper():
+            currency = "GBP"
+        elif "€" in terminal_output or "EUR" in terminal_output.upper():
+            currency = "EUR"
+
+        scraped_data.append({
+            "url": url,
+            "price": float(price) if price is not None else None,
+            "status": status,
+            "raw_output": raw_agent_output,
+            "terminal_log": terminal_output,
+            "currency": currency
+        })
+            
+    return scraped_data
+
+
+def display_final_results(data, country_name):
+    """Sorts and displays the final scraped data in a table and JSON format."""
+    if not data:
+        print("\nNo price data could be collected.")
+        return
+
+    # Sort results by price, ascending. None prices go to the bottom.
+    sorted_data = sorted(data, key=lambda x: x['price'] if x['price'] is not None else float('inf'))
+
+    # --- Display as a Table --
+    print("\n" + "="*80)
+    print(f"🛒 FINAL PRICE COMPARISON REPORT (Location: {country_name})")
+    print("="*80)
+    
+    display_list = []
+    for item in sorted_data:
+        if item['price'] is not None:
+            currency_symbol = "₹" if item.get('currency') == "INR" else "$"
+            price_display = f"{currency_symbol}{item['price']:.2f}"
+        else:
+            price_display = "N/A"
         
-        # Search and validate URLs
-        validated_urls = self.search_and_validate_urls(product_query, country_code)
-        
-        if not validated_urls:
-            print("❌ No valid URLs found!")
-            return
-        
-        # Scrape prices
-        results = await self.scrape_all_prices(validated_urls[:5], product_query)  # Limit to 5 for speed
-        
-        # Sort and display results
-        final_results = self.sort_and_display_results(results)
-        
-        # Save results to JSON
-        output_file = 'price_comparison_results.json'
-        with open(output_file, 'w') as f:
-            json.dump(final_results, f, indent=2)
-        
-        print(f"\n💾 Results saved to {output_file}")
-        
-        return final_results
+        display_list.append({
+            "Retailer URL": item['url'],
+            "Price": price_display,
+            "Availability": item['status'],
+        })
+    
+    df = pd.DataFrame(display_list)
+    df.set_index('Retailer URL', inplace=True)
+    try:
+        # Try to use IPython display for rich output in notebooks
+        display(df)
+    except Exception:
+        # Fallback for standard Python terminals
+        print(df.to_string())
+
+    # --- Display as Detailed Text (Full Details) ---
+    print("\n" + "="*80)
+    print("📋 DETAILED TEXT OUTPUT (per URL)")
+    print("="*80)
+    for item in sorted_data:
+        if item['price'] is not None:
+            currency_symbol = "₹" if item.get('currency') == "INR" else "$"
+            price_display = f"{currency_symbol}{item['price']:.2f}"
+        else:
+            price_display = "N/A"
+            
+        print(f"URL: {item['url']}")
+        print(f"  - Price: {price_display}")
+        print(f"  - Availability: {item['status']}")
+        print(f"  - Raw Agent Output: {item.get('raw_output', 'N/A')}")
+        print(f"  - Currency: {item.get('currency', 'N/A')}")
+        print("-"*60)
+
+    # --- Display as JSON ---
+    print("\n" + "="*80)
+    print("📋 JSON OUTPUT (full data)")
+    print("="*80)
+    
+    json_list = []
+    for item in sorted_data:
+        if item['price'] is not None:
+            currency_symbol = "₹" if item.get('currency') == "INR" else "$"
+            price_display = f"{currency_symbol}{item['price']:.2f}"
+        else:
+            price_display = "N/A"
+            
+        json_list.append({
+            "Retailer URL": item['url'],
+            "Price": price_display,
+            "Availability": item['status'],
+            "Raw Output": str(item.get('raw_output', '')),
+            "Currency": item.get('currency', 'N/A'),
+            "Scraped Successfully": item['price'] is not None
+        })
+    print(json.dumps(json_list, indent=2, ensure_ascii=False))
+
 
 async def main():
-    """Main function for direct execution"""
-    import sys
+    """Main asynchronous function to run the entire workflow."""
+    # --- Setup logging ---
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
     
-    # Check if JSON input is provided as command line argument
-    if len(sys.argv) > 1:
-        try:
-            input_data = json.loads(sys.argv[1])
-            product_query = input_data.get('query')
-            country_code = input_data.get('country')
-            
-            if not product_query or not country_code:
-                print("❌ Invalid JSON input. Expected: {'query': 'product', 'country': 'US'}")
-                return
-                
-            comparator = PriceComparator()
-            results = await comparator.run(product_query, country_code)
-            
-            # Output results as JSON
-            if results:
-                print(json.dumps(results, indent=2))
+    # --- Create Log Directories ---
+    LOGS_DIR = "logs"
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    logging.info(f"📂 Log directory ensured at: ./{LOGS_DIR}/")
+
+    # --- Load Environment and Check API Key ---
+    load_dotenv()
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key or gemini_api_key == "YOUR_GEMINI_API_KEY":
+        logging.error("❌ CRITICAL ERROR: GEMINI_API_KEY is not set.")
+        logging.error("   Please create a .env file and add your key: GEMINI_API_KEY='...'")
+        sys.exit(1)
+
+    # --- Step 1: Get User Input ---
+    product_query, country_code, country_name = get_user_input()
+    
+    # --- Step 2: Validate Search Results ---
+    validated_urls = validate_search_results(product_query, country_code)
+
+    if not validated_urls:
+        logging.info("\nNo credible URLs found. Exiting.")
+        return
+
+    logging.info("\n--- Final List of High-Trust URLs to Scrape ---")
+    for u in validated_urls:
+        logging.info(f"  -> {u}")
+
+    # --- Step 3: Scrape Prices with AI Agent ---
+    logging.info("\n" + "#"*80)
+    logging.info("🤖 INITIALIZING AI BROWSER AGENT FOR PRICE SCRAPING")
+    logging.info("#"*80)
+    
+    llm = ChatGoogle(model="gemini-2.5-flash", api_key=gemini_api_key)
+    scraped_data = await scrape_prices_with_agent(product_query, validated_urls, llm)
+    
+    # --- Final Step: Display Sorted Results ---
+    display_final_results(scraped_data, country_name)
+    
+    # --- Save complete run log ---
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_log_path = os.path.join(LOGS_DIR, f"run_{timestamp}.log")
+    with open(run_log_path, 'w', encoding='utf-8') as f:
+        f.write(f"Product Query: {product_query}\n")
+        f.write(f"Country: {country_name} ({country_code})\n")
+        f.write(f"URLs Processed: {len(validated_urls)}\n")
+        f.write(f"Results:\n")
+        for item in scraped_data:
+            if item['price'] is not None:
+                currency_symbol = "₹" if item.get('currency') == "INR" else "$"
+                price_str = f"{currency_symbol}{item['price']:.2f}"
             else:
-                print("[]")
-                
-        except json.JSONDecodeError:
-            print("❌ Invalid JSON input")
-    else:
-        # Interactive mode
-        comparator = PriceComparator()
-        await comparator.run()
+                price_str = "N/A"
+            f.write(f"  - {item['url']}: {price_str} ({item['status']})\n")
+    
+    logging.info(f"✅ Script finished. Full log saved to {run_log_path}")
+    print(f"✅ Script finished. Full log saved to {run_log_path}")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Ensure asyncio event loop is managed correctly
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\nProcess interrupted by user. Exiting.")

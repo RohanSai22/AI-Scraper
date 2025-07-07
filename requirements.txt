@@ -1,7 +1,13 @@
-browser-use
+# For user input and country data
 pycountry
+
+# For search result validation
 googlesearch-python
 python-whois
 pandas
+ipython
+
+# For AI-powered browser automation and API key management
+browser-use
 python-dotenv
-asyncio
+google-generativeai
