@@ -1,8 +1,11 @@
 # AI Web Scraper
 
-![Sample Output](output-sample.png)
 
 A fast, robust AI-powered product price scraper using browser_use + Gemini. Finds, validates, and extracts prices from top e-commerce sites with multi-country and multi-currency support.
+
+## SAMPLE OUTPUT :
+![image](https://github.com/user-attachments/assets/66cbec89-be6b-4612-9ab1-ecbec2cc1d83)
+
 
 ---
 
@@ -68,7 +71,9 @@ python main.py
   - By default, only 2 URLs are scraped per search for speed and to avoid Gemini API quota issues. You can increase this in `main.py` (`NUM_SEARCH_RESULTS`), but be aware of API usage if on a free tier.
 
 - **Why browser_use + Gemini?**
-  - Other approaches (Groq+Llama3, Mavericka, Scout, Selenium+heuristics) were tested but failed on context size, reliability, or dynamic content. browser_use with Gemini is the most robust for real-world e-commerce scraping.
+  - Other approaches (Groq+Llama3, Mavericka, Scout, Selenium+heuristics) were tested but failed on context size, reliability, or dynamic content. 
+    
+    browser_use with Gemini is the most robust for real-world e-commerce scraping.
 
 ---
 
